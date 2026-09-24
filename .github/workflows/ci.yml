@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: vet, staticcheck, race tests, build, the README's example scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go install honnef.co/go/tools/cmd/staticcheck@latest && staticcheck ./...
+      - run: go test -race -count=1 -cover ./...
+      - run: go build -o bin/tfwarden ./cmd/tfwarden
+      - name: the README's example must actually exit 1 with the findings it claims
+        run: |
+          set +e
+          out=$(./bin/tfwarden scan --waivers testdata/waivers.yaml testdata/small-plan.json)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" -eq 1
+          echo "$out" | grep -q "WAIVER EXPIRED"
+          echo "$out" | grep -q "2 failing, 1 waived, 1 expired waivers, 0 indeterminate"
+      - run: docker build -t tfwarden:ci .
