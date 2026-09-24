@@ -1,0 +1,12 @@
+waivers:
+  # Active: expires long after the fixed "today" the tests use (2026-06-01).
+  - rule: s3-bucket-versioning-disabled
+    resource: aws_s3_bucket.legacy
+    reason: pre-dates the versioning requirement, migration ticket JIRA-42
+    expires: "2030-01-01"
+
+  # Expired: proves an expired waiver stops suppressing and shows up again.
+  - rule: security-group-open-sensitive-port
+    resource: aws_security_group.web
+    reason: was meant to be temporary while the bastion was being set up
+    expires: "2025-01-01"

@@ -1,0 +1,63 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "clean",
+      "change": { "actions": ["create"], "after": { "bucket": "clean-bucket" }, "after_unknown": {} }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "clean",
+      "change": { "actions": ["create"], "after": {}, "after_unknown": {} }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "clean",
+      "change": {
+        "actions": ["create"],
+        "after": { "block_public_acls": true, "block_public_policy": true, "ignore_public_acls": true, "restrict_public_buckets": true },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "clean",
+      "change": { "actions": ["create"], "after": { "versioning_configuration": [{ "status": "Enabled" }] }, "after_unknown": {} }
+    }
+  ],
+  "configuration": {
+    "root_module": {
+      "resources": [
+        { "address": "aws_s3_bucket.clean", "type": "aws_s3_bucket", "name": "clean", "expressions": { "bucket": { "constant_value": "clean-bucket" } } },
+        {
+          "address": "aws_s3_bucket_server_side_encryption_configuration.clean",
+          "type": "aws_s3_bucket_server_side_encryption_configuration",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        },
+        {
+          "address": "aws_s3_bucket_public_access_block.clean",
+          "type": "aws_s3_bucket_public_access_block",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        },
+        {
+          "address": "aws_s3_bucket_versioning.clean",
+          "type": "aws_s3_bucket_versioning",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        }
+      ]
+    }
+  }
+}

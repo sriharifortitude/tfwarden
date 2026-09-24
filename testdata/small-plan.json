@@ -1,0 +1,101 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.clean",
+      "module_address": "",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "clean",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["create"], "after": { "bucket": "clean-bucket" }, "after_unknown": {} }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "clean",
+      "change": { "actions": ["create"], "after": {}, "after_unknown": {} }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "clean",
+      "change": {
+        "actions": ["create"],
+        "after": { "block_public_acls": true, "block_public_policy": true, "ignore_public_acls": true, "restrict_public_buckets": true },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.clean",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "clean",
+      "change": {
+        "actions": ["create"],
+        "after": { "versioning_configuration": [{ "status": "Enabled" }] },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket.legacy",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "legacy",
+      "change": { "actions": ["create"], "after": { "bucket": "legacy-bucket" }, "after_unknown": {} }
+    },
+    {
+      "address": "aws_security_group.web",
+      "mode": "managed",
+      "type": "aws_security_group",
+      "name": "web",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "ingress": [
+            { "cidr_blocks": ["0.0.0.0/0"], "from_port": 22, "to_port": 22, "protocol": "tcp" },
+            { "cidr_blocks": ["10.0.0.0/8"], "from_port": 443, "to_port": 443, "protocol": "tcp" }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.old",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "old",
+      "change": { "actions": ["delete"], "after": null, "after_unknown": {} }
+    }
+  ],
+  "configuration": {
+    "root_module": {
+      "resources": [
+        { "address": "aws_s3_bucket.clean", "type": "aws_s3_bucket", "name": "clean", "expressions": { "bucket": { "constant_value": "clean-bucket" } } },
+        {
+          "address": "aws_s3_bucket_server_side_encryption_configuration.clean",
+          "type": "aws_s3_bucket_server_side_encryption_configuration",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        },
+        {
+          "address": "aws_s3_bucket_public_access_block.clean",
+          "type": "aws_s3_bucket_public_access_block",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        },
+        {
+          "address": "aws_s3_bucket_versioning.clean",
+          "type": "aws_s3_bucket_versioning",
+          "name": "clean",
+          "expressions": { "bucket": { "references": ["aws_s3_bucket.clean.id", "aws_s3_bucket.clean"] } }
+        },
+        { "address": "aws_s3_bucket.legacy", "type": "aws_s3_bucket", "name": "legacy", "expressions": {} },
+        { "address": "aws_security_group.web", "type": "aws_security_group", "name": "web", "expressions": {} }
+      ]
+    }
+  }
+}
