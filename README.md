@@ -22,7 +22,7 @@ FAIL          aws_s3_bucket.legacy                          CRITICAL no aws_s3_b
 waived        aws_s3_bucket.legacy                          MEDIUM   no aws_s3_bucket_versioning references this bucket; an overwritten or deleted object cannot be recovered
               waived 2030-01-01: pre-dates the versioning requirement, migration ticket JIRA-42
 EXPIRED       aws_security_group.web                        CRITICAL ingress from 0.0.0.0/0 allows SSH (port 22)
-              fix: restrict cidr_blocks to known ranges, or front this with a bastion / VPN
+              fix: restrict the source to known ranges, or front this with a bastion / VPN
               WAIVER EXPIRED 2025-01-01: was meant to be temporary while the bastion was being set up
 
 4 findings: 2 failing, 1 waived, 1 expired waivers, 0 indeterminate
@@ -41,8 +41,20 @@ in this repository -- run it yourself with the command above.)
 | `s3-bucket-public-access-block-missing` | Critical | missing, or one that leaves a `block_*`/`ignore_*`/`restrict_*` flag off |
 | `s3-bucket-versioning-disabled` | Medium | no versioning resource, or `status` not `Enabled` |
 | `s3-bucket-public-acl` | Critical | `acl = "public-read"` or `"public-read-write"` |
-| `security-group-open-sensitive-port` | Critical | `0.0.0.0/0` ingress reaching SSH, RDP, MySQL, PostgreSQL, Redis or MongoDB |
-| `security-group-open-all-ports` | Critical | `0.0.0.0/0` ingress spanning every port (a `0-65535` range, or `protocol = "-1"`) |
+| `security-group-open-sensitive-port` | Critical | ingress from `0.0.0.0/0` or `::/0` reaching SSH, RDP, MySQL, PostgreSQL, Redis or MongoDB |
+| `security-group-open-all-ports` | Critical | ingress from `0.0.0.0/0` or `::/0` spanning every port (a `0-65535` range, or protocol `-1`) |
+
+Both security-group checks read all three ways Terraform lets you write
+an inbound rule: inline `ingress` blocks on `aws_security_group`,
+`aws_security_group_rule` with `type = "ingress"`, and
+`aws_vpc_security_group_ingress_rule`, which is now the AWS provider's
+recommended shape. For the last two, the finding names the rule resource,
+since that's what has to change. v0.1.0 read only the inline blocks and
+only IPv4. The split-resource gap was listed here as the next thing to
+add. The IPv6 gap wasn't listed anywhere, and it turned up while reading
+this code before writing
+[terraform-aws-hookrelay](https://github.com/sriharifortitude/terraform-aws-hookrelay),
+the first real Terraform scanned by this tool.
 | `rds-publicly-accessible` | Critical | `publicly_accessible = true` |
 | `rds-storage-unencrypted` | High | `storage_encrypted` false or unset (read replicas and snapshot restores are skipped -- they inherit encryption) |
 | `ebs-volume-unencrypted` | High | `encrypted` false or unset |
@@ -120,10 +132,10 @@ a machine where Docker had gone down mid-project.
 - **AWS only**, and ten checks, not two hundred. Breadth is what Checkov
   and Terrascan already do well; this is the depth-over-coverage bet the
   rest of the portfolio makes too.
-- **The classic inline `aws_security_group` `ingress` block only.** The
-  newer split-resource model (`aws_vpc_security_group_ingress_rule`, one
-  resource per rule) is not read. Both are common in the wild; this is a
-  real gap, not an oversight, and the next rule to add.
+- **Only "the whole internet" counts as open.** A rule open to a wide but
+  finite range (`10.0.0.0/8` from a peered VPC, a large partner range)
+  isn't flagged. Deciding whether that range is trusted needs knowledge
+  of the network the plan doesn't contain.
 - **No account-level defaults.** `aws_ebs_encryption_by_default` can make
   an EBS volume encrypted even with `encrypted` unset in its own
   resource; tfwarden does not chase that cross-account setting and will

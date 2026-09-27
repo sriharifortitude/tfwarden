@@ -74,3 +74,64 @@ func TestSecurityGroupNarrowRangeDoesNotTripAllPorts(t *testing.T) {
 		t.Fatalf("a narrow open range is not all-ports: %+v", got)
 	}
 }
+
+func TestSecurityGroupOpenToTheWholeIPv6Internet(t *testing.T) {
+	// ::/0 is the IPv6 equivalent of 0.0.0.0/0; v0.1.0 read only IPv4.
+	v6 := res("aws_security_group.v6", "aws_security_group",
+		ingress(map[string]any{"cidr_blocks": []any{}, "ipv6_cidr_blocks": []any{"::/0"}, "from_port": float64(22), "to_port": float64(22), "protocol": "tcp"}))
+	got := findingsFor(ruleByID("security-group-open-sensitive-port"), "aws_security_group.v6", []planjson.Resource{v6})
+	if len(got) != 1 || got[0].Message != "ingress from ::/0 allows SSH (port 22)" {
+		t.Fatalf("ipv6 ssh: %+v", got)
+	}
+}
+
+func TestSplitIngressRuleResourceIsChecked(t *testing.T) {
+	// aws_vpc_security_group_ingress_rule: one rule per resource, the
+	// model the AWS provider now recommends. The finding names the rule
+	// resource, since that is what has to change.
+	pg := res("aws_vpc_security_group_ingress_rule.pg", "aws_vpc_security_group_ingress_rule",
+		map[string]any{"cidr_ipv4": "0.0.0.0/0", "from_port": float64(5432), "to_port": float64(5432), "ip_protocol": "tcp"})
+	https := res("aws_vpc_security_group_ingress_rule.https", "aws_vpc_security_group_ingress_rule",
+		map[string]any{"cidr_ipv4": "0.0.0.0/0", "from_port": float64(443), "to_port": float64(443), "ip_protocol": "tcp"})
+	fromSG := res("aws_vpc_security_group_ingress_rule.from_app", "aws_vpc_security_group_ingress_rule",
+		map[string]any{"cidr_ipv4": nil, "referenced_security_group_id": "sg-123", "from_port": float64(5432), "to_port": float64(5432), "ip_protocol": "tcp"})
+	resources := []planjson.Resource{pg, https, fromSG}
+	rule := ruleByID("security-group-open-sensitive-port")
+
+	if got := findingsFor(rule, "aws_vpc_security_group_ingress_rule.pg", resources); len(got) != 1 || got[0].Message != "ingress from 0.0.0.0/0 allows PostgreSQL (port 5432)" {
+		t.Fatalf("split rule, open postgres: %+v", got)
+	}
+	if got := findingsFor(rule, "aws_vpc_security_group_ingress_rule.https", resources); len(got) != 0 {
+		t.Fatalf("split rule, open 443 is not a sensitive port: %+v", got)
+	}
+	if got := findingsFor(rule, "aws_vpc_security_group_ingress_rule.from_app", resources); len(got) != 0 {
+		t.Fatalf("split rule from another security group, no cidr: %+v", got)
+	}
+}
+
+func TestSplitIngressRuleAllProtocolsOverIPv6(t *testing.T) {
+	// ip_protocol "-1" leaves from_port/to_port null in the plan.
+	all := res("aws_vpc_security_group_ingress_rule.all", "aws_vpc_security_group_ingress_rule",
+		map[string]any{"cidr_ipv6": "::/0", "from_port": nil, "to_port": nil, "ip_protocol": "-1"})
+	resources := []planjson.Resource{all}
+	if got := findingsFor(ruleByID("security-group-open-all-ports"), "aws_vpc_security_group_ingress_rule.all", resources); len(got) != 1 {
+		t.Fatalf("all protocols from ::/0: %+v", got)
+	}
+	if got := findingsFor(ruleByID("security-group-open-sensitive-port"), "aws_vpc_security_group_ingress_rule.all", resources); len(got) != 1 {
+		t.Fatalf("all protocols should trip sensitive-port once: %+v", got)
+	}
+}
+
+func TestLegacySecurityGroupRuleResourceIsChecked(t *testing.T) {
+	in := res("aws_security_group_rule.ssh_in", "aws_security_group_rule",
+		map[string]any{"type": "ingress", "cidr_blocks": []any{"0.0.0.0/0"}, "from_port": float64(22), "to_port": float64(22), "protocol": "tcp"})
+	out := res("aws_security_group_rule.all_out", "aws_security_group_rule",
+		map[string]any{"type": "egress", "cidr_blocks": []any{"0.0.0.0/0"}, "from_port": float64(0), "to_port": float64(0), "protocol": "-1"})
+	resources := []planjson.Resource{in, out}
+	if got := findingsFor(ruleByID("security-group-open-sensitive-port"), "aws_security_group_rule.ssh_in", resources); len(got) != 1 {
+		t.Fatalf("legacy ingress rule, open ssh: %+v", got)
+	}
+	if got := findingsFor(ruleByID("security-group-open-all-ports"), "aws_security_group_rule.all_out", resources); len(got) != 0 {
+		t.Fatalf("egress is not ingress: %+v", got)
+	}
+}
