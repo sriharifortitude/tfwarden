@@ -9,6 +9,7 @@ package planjson
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Plan is the subset of the plan JSON schema tfwarden reads. Fields not
@@ -69,6 +70,11 @@ type ResourceConfig struct {
 	Type        string                     `json:"type"`
 	Name        string                     `json:"name"`
 	Expressions map[string]json.RawMessage `json:"expressions"`
+
+	// ModulePath is where this block sits, e.g. "module.store" ("" at the
+	// root). Addresses and references inside a module's configuration are
+	// relative to it; this is what makes them absolute.
+	ModulePath string `json:"-"`
 }
 
 // Reference returns the resource address a single-valued attribute
@@ -94,7 +100,14 @@ func (rc ResourceConfig) Reference(attr string) (string, bool) {
 			break
 		}
 	}
-	return ref, true
+	return joinAddress(rc.ModulePath, ref), true
+}
+
+func joinAddress(modulePath, addr string) string {
+	if modulePath == "" {
+		return addr
+	}
+	return modulePath + "." + addr
 }
 
 func isResourceAddress(s string) bool {
@@ -138,6 +151,92 @@ type Resource struct {
 	After   map[string]any
 	Unknown map[string]bool
 	Config  *ResourceConfig
+
+	// ConfigAddress is the address of the configuration block this instance
+	// came from: Address with every module and resource instance key
+	// removed. module.store["a"].aws_s3_bucket.this[0] and [1] both have
+	// ConfigAddress module.store.aws_s3_bucket.this, the form a reference in
+	// another block's configuration resolves to.
+	ConfigAddress string
+
+	// UnknownTree is after_unknown exactly as Terraform wrote it. Unknown
+	// flattens it to one bool per top-level key, which is right for scalar
+	// attributes but wrong for a nested block: one computed sub-field (S3
+	// versioning's mfa_delete) would make the whole block, including a
+	// status written literally in the config, look unknown. Use UnknownAt
+	// for anything inside a block.
+	UnknownTree any
+}
+
+// ConfigAddr is ConfigAddress, or Address for a Resource built by hand
+// without one (as rule unit tests do).
+func (r Resource) ConfigAddr() string {
+	if r.ConfigAddress != "" {
+		return r.ConfigAddress
+	}
+	return r.Address
+}
+
+// InstanceKey is the trailing [index] or ["key"] of Address, or "" for a
+// resource without count or for_each.
+func (r Resource) InstanceKey() string {
+	i := strings.LastIndex(r.Address, r.Type+"."+r.Name)
+	if i < 0 {
+		return ""
+	}
+	return r.Address[i+len(r.Type)+1+len(r.Name):]
+}
+
+// UnknownAt reports whether the value at path is not known until apply.
+// Path steps are map keys (string) and list positions (int). An unknown
+// ancestor makes everything under it unknown; at the end of the path, a
+// subtree containing any unknown counts as unknown.
+func (r Resource) UnknownAt(path ...any) bool {
+	if r.UnknownTree == nil && len(path) > 0 {
+		// Built by hand with only the flattened map (rule unit tests):
+		// fall back to its top-level answer.
+		key, _ := path[0].(string)
+		return r.Unknown[key]
+	}
+	node := r.UnknownTree
+	for _, step := range path {
+		switch n := node.(type) {
+		case bool:
+			return n
+		case map[string]any:
+			key, _ := step.(string)
+			node = n[key]
+		case []any:
+			i, ok := step.(int)
+			if !ok || i < 0 || i >= len(n) {
+				return false
+			}
+			node = n[i]
+		default:
+			return false // nothing recorded here: known
+		}
+	}
+	return containsUnknown(node)
+}
+
+func containsUnknown(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case map[string]any:
+		for _, e := range x {
+			if containsUnknown(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if containsUnknown(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Resources returns every managed resource being created or updated
@@ -145,7 +244,7 @@ type Resource struct {
 // for a rule to check) as a flat list regardless of module nesting.
 func (p *Plan) Resources() []Resource {
 	byAddr := map[string]*ResourceConfig{}
-	collectConfig(p.Configuration.RootModule, byAddr)
+	collectConfig(p.Configuration.RootModule, "", byAddr)
 
 	out := make([]Resource, 0, len(p.ResourceChanges))
 	for _, rc := range p.ResourceChanges {
@@ -157,8 +256,17 @@ func (p *Plan) Resources() []Resource {
 			continue // a resource whose `after` is not an object (shouldn't happen); skip rather than guess
 		}
 		unknown := decodeUnknown(rc.Change.AfterUnknown)
-		r := Resource{Address: rc.Address, Type: rc.Type, Name: rc.Name, After: after, Unknown: unknown}
-		if cfg, ok := byAddr[rc.Address]; ok {
+		configAddr := joinAddress(stripInstanceKeys(rc.ModuleAddr), rc.Type+"."+rc.Name)
+		var unknownTree any
+		if len(rc.Change.AfterUnknown) > 0 {
+			_ = json.Unmarshal(rc.Change.AfterUnknown, &unknownTree) // malformed: treat as nothing unknown, as decodeUnknown does
+		}
+		r := Resource{Address: rc.Address, Type: rc.Type, Name: rc.Name, After: after, Unknown: unknown, ConfigAddress: configAddr, UnknownTree: unknownTree}
+		// Looked up by configuration address, not instance address: v0.1.x
+		// used rc.Address here, which never matched a resource inside a
+		// module (module.x. prefix) or one with count/for_each ([0] suffix),
+		// so every such resource looked as if nothing referenced it.
+		if cfg, ok := byAddr[configAddr]; ok {
 			r.Config = cfg
 		}
 		out = append(out, r)
@@ -166,13 +274,39 @@ func (p *Plan) Resources() []Resource {
 	return out
 }
 
-func collectConfig(m ModuleConfig, out map[string]*ResourceConfig) {
+func collectConfig(m ModuleConfig, modulePath string, out map[string]*ResourceConfig) {
 	for i := range m.Resources {
-		out[m.Resources[i].Address] = &m.Resources[i]
+		cfg := &m.Resources[i]
+		cfg.ModulePath = modulePath
+		out[joinAddress(modulePath, cfg.Address)] = cfg
 	}
-	for _, call := range m.ModuleCalls {
-		collectConfig(call.Module, out)
+	for name, call := range m.ModuleCalls {
+		collectConfig(call.Module, joinAddress(modulePath, "module."+name), out)
 	}
+}
+
+// stripInstanceKeys removes every [index] or ["key"] from an address,
+// respecting quotes, since a for_each key is a string that may itself
+// contain "]".
+func stripInstanceKeys(addr string) string {
+	var b strings.Builder
+	depth, quoted := 0, false
+	for i := 0; i < len(addr); i++ {
+		c := addr[i]
+		switch {
+		case depth > 0 && quoted && c == '\\' && i+1 < len(addr):
+			i++ // skip the escaped character
+		case depth > 0 && c == '"':
+			quoted = !quoted
+		case !quoted && c == '[':
+			depth++
+		case !quoted && c == ']' && depth > 0:
+			depth--
+		case depth == 0:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // decodeUnknown flattens Terraform's after_unknown shape (bool, or a

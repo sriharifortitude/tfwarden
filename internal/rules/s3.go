@@ -10,35 +10,44 @@ func init() {
 }
 
 // findReferencing returns every resource of `refType` whose `refAttr`
-// (a symbolic reference in the configuration) points at target's address.
+// (a symbolic reference in the configuration) points at target.
 // This is the cross-resource pattern: modern AWS provider versions split
 // what used to be inline S3 bucket arguments into separate resources tied
 // together only by a reference, so "does this bucket have X" means
 // "does some other resource of type X exist that points at this bucket".
-func findReferencing(resources []planjson.Resource, refType, refAttr, targetAddr string) []planjson.Resource {
-	var out []planjson.Resource
+//
+// References live in configuration, so they name a configuration block,
+// not an instance: aws_s3_bucket.logs[count.index] is recorded as
+// aws_s3_bucket.logs. Every instance of the referencing block therefore
+// matches every instance of the target; a match with the same instance key
+// as target ([1] for [1]) is listed first, so a rule reading matches[0]
+// reads the one that corresponds.
+func findReferencing(resources []planjson.Resource, refType, refAttr string, target planjson.Resource) []planjson.Resource {
+	var same, other []planjson.Resource
 	for _, r := range resources {
 		if r.Type != refType || r.Config == nil {
 			continue
 		}
-		if ref, ok := r.Config.Reference(refAttr); ok && ref == targetAddr {
-			out = append(out, r)
+		if ref, ok := r.Config.Reference(refAttr); ok && ref == target.ConfigAddr() {
+			if r.InstanceKey() == target.InstanceKey() {
+				same = append(same, r)
+			} else {
+				other = append(other, r)
+			}
 		}
 	}
-	return out
+	return append(same, other...)
 }
 
-func nestedBlock(r planjson.Resource, key string) (map[string]any, bool) {
-	v, ok := attr(r, key)
-	if !ok {
-		return nil, false
-	}
+// firstBlock returns the single nested block a plan encodes as a
+// one-element list, or nil if it is absent.
+func firstBlock(v any) map[string]any {
 	list, isList := v.([]any)
 	if !isList || len(list) == 0 {
-		return nil, false
+		return nil
 	}
-	m, isMap := list[0].(map[string]any)
-	return m, isMap
+	m, _ := list[0].(map[string]any)
+	return m
 }
 
 type s3EncryptionMissing struct{}
@@ -55,7 +64,7 @@ func (rule s3EncryptionMissing) Check(resources []planjson.Resource, _ map[strin
 		if r.Type != "aws_s3_bucket" {
 			continue
 		}
-		matches := findReferencing(resources, "aws_s3_bucket_server_side_encryption_configuration", "bucket", r.Address)
+		matches := findReferencing(resources, "aws_s3_bucket_server_side_encryption_configuration", "bucket", r)
 		if len(matches) == 0 {
 			out = append(out, Finding{
 				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Fail,
@@ -81,7 +90,7 @@ func (rule s3PublicAccessBlockMissing) Check(resources []planjson.Resource, _ ma
 		if r.Type != "aws_s3_bucket" {
 			continue
 		}
-		matches := findReferencing(resources, "aws_s3_bucket_public_access_block", "bucket", r.Address)
+		matches := findReferencing(resources, "aws_s3_bucket_public_access_block", "bucket", r)
 		if len(matches) == 0 {
 			out = append(out, Finding{
 				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Fail,
@@ -135,7 +144,7 @@ func (rule s3VersioningDisabled) Check(resources []planjson.Resource, _ map[stri
 		if r.Type != "aws_s3_bucket" {
 			continue
 		}
-		matches := findReferencing(resources, "aws_s3_bucket_versioning", "bucket", r.Address)
+		matches := findReferencing(resources, "aws_s3_bucket_versioning", "bucket", r)
 		if len(matches) == 0 {
 			out = append(out, Finding{
 				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Fail,
@@ -145,21 +154,25 @@ func (rule s3VersioningDisabled) Check(resources []planjson.Resource, _ map[stri
 			continue
 		}
 		v := matches[0]
-		block, ok := nestedBlock(v, "versioning_configuration")
-		if !ok {
+		// Asks about status itself: the block around it routinely has a
+		// computed sibling (mfa_delete) that is unknown at plan time and
+		// says nothing about whether versioning is on.
+		if v.UnknownAt("versioning_configuration", 0, "status") {
+			out = append(out, Finding{
+				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Indeterminate,
+				Message: v.Address + "'s versioning status is not known at plan time",
+			})
+			continue
+		}
+		block := firstBlock(v.After["versioning_configuration"])
+		if block == nil {
 			out = append(out, Finding{
 				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Indeterminate,
 				Message: v.Address + "'s versioning_configuration is not known at plan time",
 			})
 			continue
 		}
-		status, known := stringAttr(planjson.Resource{After: block, Unknown: v.Unknown}, "status")
-		if !known {
-			out = append(out, Finding{
-				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Indeterminate,
-				Message: v.Address + "'s versioning status is not known at plan time",
-			})
-		} else if status != "Enabled" {
+		if status, _ := block["status"].(string); status != "Enabled" {
 			out = append(out, Finding{
 				RuleID: rule.ID(), Severity: rule.Severity(), Resource: r.Address, Status: Fail,
 				Message:     v.Address + " sets status = " + status + ", not Enabled",

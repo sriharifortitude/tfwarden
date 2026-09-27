@@ -2,6 +2,7 @@ package planjson
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -185,5 +186,97 @@ func TestDecodeUnknownFlattensNestedShapesToTheirTopLevelKey(t *testing.T) {
 	}
 	if !unknown["versioning_configuration"] {
 		t.Fatal("a nested unknown sub-attribute should mark the whole key unknown")
+	}
+}
+
+func TestStripInstanceKeys(t *testing.T) {
+	cases := map[string]string{
+		"":                               "",
+		"module.store":                   "module.store",
+		"module.store[0]":                "module.store",
+		`module.store["eu-west-1"]`:      "module.store",
+		`module.a["x"].module.b[2]`:      "module.a.module.b",
+		`module.odd["has]bracket"]`:      "module.odd",
+		`module.esc["quote\"]inside"].x`: "module.esc.x",
+		`aws_s3_bucket.logs["a"]`:        "aws_s3_bucket.logs",
+	}
+	for in, want := range cases {
+		if got := stripInstanceKeys(in); got != want {
+			t.Errorf("stripInstanceKeys(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInstanceKey(t *testing.T) {
+	cases := []struct{ addr, typ, name, want string }{
+		{"aws_s3_bucket.logs", "aws_s3_bucket", "logs", ""},
+		{"aws_s3_bucket.logs[1]", "aws_s3_bucket", "logs", "[1]"},
+		{`module.m["a"].aws_s3_bucket.logs["b"]`, "aws_s3_bucket", "logs", `["b"]`},
+	}
+	for _, c := range cases {
+		r := Resource{Address: c.addr, Type: c.typ, Name: c.name}
+		if got := r.InstanceKey(); got != c.want {
+			t.Errorf("InstanceKey(%q) = %q, want %q", c.addr, got, c.want)
+		}
+	}
+}
+
+func TestUnknownAtLooksAtTheExactField(t *testing.T) {
+	// The real after_unknown for an aws_s3_bucket_versioning with a literal
+	// status: only the computed mfa_delete is unknown.
+	r := Resource{UnknownTree: map[string]any{
+		"versioning_configuration": []any{map[string]any{"mfa_delete": true}},
+		"id":                       true,
+	}}
+	if r.UnknownAt("versioning_configuration", 0, "status") {
+		t.Errorf("status is known; only its sibling mfa_delete is not")
+	}
+	if !r.UnknownAt("versioning_configuration", 0, "mfa_delete") {
+		t.Errorf("mfa_delete is unknown")
+	}
+	if !r.UnknownAt("versioning_configuration") {
+		t.Errorf("a block containing an unknown field counts as unknown when asked about as a whole")
+	}
+	if !r.UnknownAt("id") || r.UnknownAt("bucket") {
+		t.Errorf("top-level: id unknown, bucket known")
+	}
+
+	whole := Resource{UnknownTree: map[string]any{"versioning_configuration": true}}
+	if !whole.UnknownAt("versioning_configuration", 0, "status") {
+		t.Errorf("an unknown ancestor makes the field under it unknown")
+	}
+}
+
+func TestModuleResourcesGetConfigAndAbsoluteReferences(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/modules-and-count/plan.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byAddr := Index(p.Resources())
+
+	v, ok := byAddr["module.good.aws_s3_bucket_versioning.this[0]"]
+	if !ok || v.Config == nil {
+		t.Fatalf("module instance should have its configuration attached: %+v", v)
+	}
+	if v.ConfigAddress != "module.good.aws_s3_bucket_versioning.this" {
+		t.Errorf("ConfigAddress = %q", v.ConfigAddress)
+	}
+	if ref, _ := v.Config.Reference("bucket"); ref != "module.good.aws_s3_bucket.this" {
+		t.Errorf("reference inside module.good should resolve absolutely, got %q", ref)
+	}
+
+	// The same module is called twice; each call's config must stay its own.
+	b, ok := byAddr["module.bad.aws_s3_bucket.this"]
+	if !ok || b.Config == nil || b.Config.ModulePath != "module.bad" {
+		t.Fatalf("module.bad's bucket should carry module.bad's config: %+v", b.Config)
+	}
+
+	c, ok := byAddr["aws_s3_bucket_versioning.counted[1]"]
+	if !ok || c.Config == nil || c.ConfigAddress != "aws_s3_bucket_versioning.counted" {
+		t.Fatalf("a count instance should find its configuration block: %+v", c)
 	}
 }
